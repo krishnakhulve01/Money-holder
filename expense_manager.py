@@ -23,6 +23,7 @@ PDF needs one library (only once):   pip install reportlab
 import calendar
 import json
 import os
+import psycopg2
 import re
 import subprocess
 import sys
