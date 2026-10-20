@@ -188,52 +188,157 @@ def data_path(year, month):
     return os.path.join(DATA_DIR, f"{year}-{month:02d}.json")
 
 
+def _validate_month_data(d, year, month):
+    """Check that saved expense data is valid."""
+    if not isinstance(d, dict) or not REQUIRED_KEYS <= set(d):
+        raise ValueError("Saved data is missing required fields.")
+
+    if d["year"] != year or d["month"] != month:
+        raise ValueError("Saved data belongs to a different month.")
+
+    Decimal(d["previous_balance"])
+
+    for value in d["received"].values():
+        Decimal(value)
+
+    for expense in d["expenses"]:
+        Decimal(expense["cost"])
+        date.fromisoformat(expense["date"])
+        expense["id"], expense["product"]
+
+    for item in d.get("extra_received", []):
+        Decimal(item["amount"])
+        date.fromisoformat(item["date"])
+        item["id"], item["name"]
+
+    return d
+
+
+def _ensure_database_table(conn):
+    """Create the PostgreSQL table if it does not already exist."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS monthly_expenses (
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                data JSONB NOT NULL,
+                PRIMARY KEY (year, month)
+            )
+        """)
+    conn.commit()
+
+
 def save_data(d):
-    """Write safely: first to a temp file, then replace the real file."""
+    """Save monthly expenses to PostgreSQL when configured."""
+    database_url = os.environ.get("DATABASE_URL")
+
+    if database_url:
+        conn = psycopg2.connect(database_url)
+
+        try:
+            _ensure_database_table(conn)
+
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO monthly_expenses (year, month, data)
+                        VALUES (%s, %s, %s::jsonb)
+                        ON CONFLICT (year, month)
+                        DO UPDATE SET data = EXCLUDED.data
+                    """, (
+                        d["year"],
+                        d["month"],
+                        json.dumps(d)
+                    ))
+        finally:
+            conn.close()
+
+        return
+
+    # Local JSON-file storage when PostgreSQL is not configured.
     os.makedirs(DATA_DIR, exist_ok=True)
+
     path = data_path(d["year"], d["month"])
     temp = path + ".tmp"
+
     with open(temp, "w", encoding="utf-8") as f:
         json.dump(d, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
+
     os.replace(temp, path)
 
 
 def load_data(year, month):
-    """Return the saved month, or None if there is none / it is damaged."""
+    """Load monthly expenses from PostgreSQL or a local JSON file."""
+    database_url = os.environ.get("DATABASE_URL")
+
+    if database_url:
+        conn = psycopg2.connect(database_url)
+
+        try:
+            _ensure_database_table(conn)
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT data
+                    FROM monthly_expenses
+                    WHERE year = %s AND month = %s
+                """, (year, month))
+
+                row = cur.fetchone()
+
+            if row is not None:
+                # PostgreSQL JSONB is normally returned as a Python dictionary.
+                d = row[0]
+
+                if isinstance(d, str):
+                    d = json.loads(d)
+
+                return _validate_month_data(d, year, month)
+
+        finally:
+            conn.close()
+
+    # No PostgreSQL record was found. Check for an older local JSON file.
     path = data_path(year, month)
+
     if not os.path.exists(path):
         return None
+
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
-        if not REQUIRED_KEYS <= set(d):
-            raise ValueError("missing fields")
-        if d["year"] != year or d["month"] != month:
-            raise ValueError("wrong month")
-        Decimal(d["previous_balance"])
-        for value in d["received"].values():
-            Decimal(value)
-        for e in d["expenses"]:
-            Decimal(e["cost"])
-            date.fromisoformat(e["date"])
-            e["id"], e["product"]
-        for x in d.get("extra_received", []):
-            Decimal(x["amount"])
-            date.fromisoformat(x["date"])
-            x["id"], x["name"]
-        return d
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, ArithmeticError):
+
+        d = _validate_month_data(d, year, month)
+
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        ArithmeticError
+    ):
         broken = path + ".damaged"
+
         try:
             os.replace(path, broken)
-            print(f"\n  ! The saved file for {month_label(year, month)} was damaged.")
+            print(
+                f"\n  ! The saved file for "
+                f"{month_label(year, month)} was damaged."
+            )
             print(f"    It was kept as: {broken}")
         except OSError:
             pass
+
         return None
 
+    # Migrate an existing local month into PostgreSQL.
+    if database_url:
+        save_data(d)
+
+    return d
 
 # --------------------------------------------------------------------------
 # Money calculations (Decimal is used, so there are no rounding errors)
