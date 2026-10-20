@@ -115,13 +115,24 @@ def parse_month(text):
 
 def saved_months():
     months = set()
+
+    # Include months saved as local JSON files.
     if os.path.isdir(em.DATA_DIR):
         for name in os.listdir(em.DATA_DIR):
             found = re.fullmatch(r"(\d{4})-(\d{2})\.json", name)
             if found:
                 months.add((int(found[1]), int(found[2])))
-    return months
 
+    # Always offer the current month and the next month.
+    today = date.today()
+    months.add((today.year, today.month))
+
+    if today.month == 12:
+        months.add((today.year + 1, 1))
+    else:
+        months.add((today.year, today.month + 1))
+
+    return months
 
 def load(ym):
     with LOCK:
