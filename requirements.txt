@@ -1,1 +1,2 @@
-Reportlab
+reportlab
+psycopg2-binary
